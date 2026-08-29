@@ -137,7 +137,9 @@ TCGVendors.BossDrop.Enabled = 0
 #  TCGVendors.BossDrop.CreatureIds
 #
 #    Comma-separated list of creature_template entry IDs for the bosses
-#    that should trigger a code drop on kill.
+#    that should trigger a code drop on kill. This works identically for
+#    dungeon bosses and raid bosses — list any boss entry ID from either
+#    dungeons or raids that you want to grant a chance at the stationery.
 #
 #    On startup, each entry listed here will automatically receive a
 #    creature_loot_template row for item 9311 at 100% drop chance if one
@@ -146,7 +148,9 @@ TCGVendors.BossDrop.Enabled = 0
 #    Removing an entry from this list does NOT delete existing loot template
 #    rows — remove those manually from creature_loot_template if desired.
 #
-#    The following is a list of all Raid boss ID's, followed by a string of all the ID's for use in the config
+#    The following is a list of all Raid boss ID's, followed by a string of all the ID's for use in the config.
+#    Dungeon boss entries are not enumerated here (there are far too many across all expansions)
+#    but may be added to the list the same way — just append their creature_template entry IDs.
 #
 #    10184	Onyxia (Level 80)
 #    11502	Ragnaros
@@ -234,26 +238,13 @@ TCGVendors.BossDrop.MailParticipants = 0
 #  TCGVendors.BossDrop.Chance
 #
 #    Percent chance (1-100) that a configured boss kill actually produces a
-#    stationery code, rolled once per kill after the cooldown below has
-#    elapsed. This keeps the boss drop a rare bonus rather than a guaranteed
-#    reward every time an eligible boss dies.
+#    stationery code. This keeps the boss drop a rare bonus rather than a
+#    guaranteed reward every time an eligible boss dies.
+#
+#    Applies equally to every boss listed in TCGVendors.BossDrop.CreatureIds,
+#    whether it is a dungeon boss or a raid boss -- just list any boss entry
+#    you want covered.
 #
 #    Default: 5
 #
 TCGVendors.BossDrop.Chance = 5
-
-###############################################################################
-#  TCGVendors.BossDrop.CooldownHours
-#
-#    Minimum number of hours that must pass between successful boss drops,
-#    regardless of how many configured bosses are killed in the meantime.
-#    The cooldown timer only starts on a successful drop (i.e. after the
-#    Chance roll above succeeds) and is persisted across restarts in the
-#    mod_tcg_vendors_state table.
-#
-#    The default of 48 limits the boss drop to at most once every other day,
-#    server-wide.
-#
-#    Default: 48
-#
-TCGVendors.BossDrop.CooldownHours = 48

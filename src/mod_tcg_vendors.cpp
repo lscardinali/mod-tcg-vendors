@@ -15,7 +15,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <ctime>
 #include <map>
 #include <string>
 #include <vector>
@@ -2355,9 +2354,8 @@ static int GetBossDropMailMode()
 
 // TCGVendors.BossDrop.Chance
 //   Percent chance (1-100) that a configured boss kill actually produces a
-//   stationery code, evaluated once per kill after the cooldown gate below
-//   has been cleared. Keep this low — the drop is meant to be a rare bonus,
-//   not a guaranteed reward.
+//   stationery code. Keep this low — the drop is meant to be a rare bonus,
+//   not a guaranteed reward on every kill.
 static uint32 GetBossDropChance()
 {
     int chance = sConfigMgr->GetOption<int>("TCGVendors.BossDrop.Chance", 5);
@@ -2369,64 +2367,6 @@ static uint32 GetBossDropChance()
         return 5;
     }
     return static_cast<uint32>(chance);
-}
-
-// TCGVendors.BossDrop.CooldownHours
-//   Minimum number of hours that must pass between successful boss drops,
-//   regardless of how many configured bosses are killed in the meantime.
-//   Default of 48 limits the drop to once every other day.
-static uint32 GetBossDropCooldownHours()
-{
-    int hours = sConfigMgr->GetOption<int>("TCGVendors.BossDrop.CooldownHours", 48);
-    if (hours < 0)
-    {
-        LOG_WARN("module",
-            "mod-tcg-vendors: TCGVendors.BossDrop.CooldownHours has invalid value {} "
-            "— falling back to 48.", hours);
-        return 48;
-    }
-    return static_cast<uint32>(hours);
-}
-
-// ============================================================
-//  Boss Drop Cooldown Persistence
-//
-//  A single row in `mod_tcg_vendors_state` tracks the UTC unix timestamp of
-//  the last successful boss drop. This is loaded once at startup and kept
-//  in memory afterwards; it is only re-written to the database when a new
-//  drop actually succeeds, so the cooldown survives server restarts.
-// ============================================================
-static time_t s_lastBossDropTime = 0;
-
-static void LoadLastBossDropTime()
-{
-    QueryResult result = CharacterDatabase.Query(
-        "SELECT last_drop_time FROM mod_tcg_vendors_state WHERE id = 1");
-    if (result)
-        s_lastBossDropTime = static_cast<time_t>((*result)[0].Get<uint64>());
-    else
-        s_lastBossDropTime = 0;
-}
-
-static void SaveLastBossDropTime(time_t when)
-{
-    s_lastBossDropTime = when;
-    CharacterDatabase.Execute(
-        "INSERT INTO mod_tcg_vendors_state (id, last_drop_time) VALUES (1, {}) "
-        "ON DUPLICATE KEY UPDATE last_drop_time = {}",
-        static_cast<uint64>(when), static_cast<uint64>(when));
-}
-
-// Returns true once the cooldown window has elapsed and it is time to roll
-// for another boss drop chance.
-static bool IsBossDropCooldownElapsed()
-{
-    uint32 cooldownHours = GetBossDropCooldownHours();
-    if (cooldownHours == 0)
-        return true;
-
-    time_t now = time(nullptr);
-    return (now - s_lastBossDropTime) >= static_cast<time_t>(cooldownHours) * 3600;
 }
 
 // ============================================================
@@ -2478,18 +2418,12 @@ public:
         if (itemIds.empty())
             return;
 
-        // ---- Rarity + cooldown gate ----
-        // The cooldown must have fully elapsed before we even roll the chance,
-        // and a successful roll is required to actually produce a drop. This
-        // guarantees at most one boss drop server-wide per cooldown window
-        // (default: once every other day), and keeps the drop itself rare.
-        if (!IsBossDropCooldownElapsed())
-            return;
-
+        // ---- Rarity gate ----
+        // Roll once per kill; a low default chance keeps the stationery a
+        // rare bonus rather than a guaranteed reward every time a
+        // configured boss dies.
         if (urand(1, 100) > GetBossDropChance())
             return;
-
-        SaveLastBossDropTime(time(nullptr));
 
         uint32 itemId = itemIds[urand(0, static_cast<uint32>(itemIds.size()) - 1)];
         std::string rewardGroup = GetRewardGroupForItem(itemId);
@@ -2634,9 +2568,6 @@ public:
 
     void OnStartup() override
     {
-        // Load the persisted cooldown timestamp so it survives restarts.
-        LoadLastBossDropTime();
-
         // Always purge ALL item 9311 rows on startup.
         // This keeps creature_loot_template in exact sync with the config
         // whether the feature is enabled, disabled, or CreatureIds is empty.
