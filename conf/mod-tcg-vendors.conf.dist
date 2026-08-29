@@ -229,3 +229,31 @@ TCGVendors.BossDrop.ItemIds =
 #    Default: 0
 #
 TCGVendors.BossDrop.MailParticipants = 0
+
+###############################################################################
+#  TCGVendors.BossDrop.Chance
+#
+#    Percent chance (1-100) that a configured boss kill actually produces a
+#    stationery code, rolled once per kill after the cooldown below has
+#    elapsed. This keeps the boss drop a rare bonus rather than a guaranteed
+#    reward every time an eligible boss dies.
+#
+#    Default: 5
+#
+TCGVendors.BossDrop.Chance = 5
+
+###############################################################################
+#  TCGVendors.BossDrop.CooldownHours
+#
+#    Minimum number of hours that must pass between successful boss drops,
+#    regardless of how many configured bosses are killed in the meantime.
+#    The cooldown timer only starts on a successful drop (i.e. after the
+#    Chance roll above succeeds) and is persisted across restarts in the
+#    mod_tcg_vendors_state table.
+#
+#    The default of 48 limits the boss drop to at most once every other day,
+#    server-wide.
+#
+#    Default: 48
+#
+TCGVendors.BossDrop.CooldownHours = 48

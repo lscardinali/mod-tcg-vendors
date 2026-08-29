@@ -389,14 +389,30 @@ Controls how stationery is delivered to players and whether a loot-window drop i
 
 Solo players (no group) receive mail to themselves when mail delivery is active.
 
+### `TCGVendors.BossDrop.Chance`
+
+Percent chance (`1`-`100`) that a configured boss kill actually produces a stationery
+code, rolled once per kill after the cooldown below has elapsed. Default: `5`. Keep this
+low — the drop is meant to be a rare bonus, not a guaranteed reward.
+
+### `TCGVendors.BossDrop.CooldownHours`
+
+Minimum number of hours that must pass between successful boss drops, regardless of how
+many configured bosses are killed in the meantime. The cooldown only starts counting after
+a successful drop (i.e. once the `Chance` roll above succeeds), and is persisted across
+restarts in the `mod_tcg_vendors_state` table. Default: `48` — at most one boss drop
+server-wide every other day.
+
 ---
 
 ## Boss Drop System
 
 When enabled, the boss drop system hooks into the kill event for each configured boss. On
-kill, a reward item is selected at random from `TCGVendors.BossDrop.ItemIds`, a unique
-`XXXX-XXXX-XXXX-XXXX` code is generated and inserted into `account_tcg_codes` as unredeemed,
-and delivery proceeds according to `TCGVendors.BossDrop.MailParticipants`.
+kill, once the cooldown has elapsed and `TCGVendors.BossDrop.Chance` succeeds, a reward item
+is selected at random from `TCGVendors.BossDrop.ItemIds`, a unique `XXXX-XXXX-XXXX-XXXX` code
+is generated and inserted into `account_tcg_codes` as unredeemed, and delivery proceeds
+according to `TCGVendors.BossDrop.MailParticipants`. Kills that fail the chance roll, or
+that occur while the cooldown is still active, produce no code.
 
 The stationery item (Default Stationery, item 9311) is readable in-game by right-clicking it
 in the player's inventory. It contains the generated code, the name of the boss defeated,
@@ -534,6 +550,17 @@ The `reward_group` values match the keys shown by `--list-groups` exactly. To ad
 manually without using the generator, insert rows with a valid `reward_group` key and
 `redeemed = 0`.
 
+**`mod_tcg_vendors_state`** — single-row table persisting the UTC unix timestamp of the
+last successful boss stationery drop, used to enforce `TCGVendors.BossDrop.CooldownHours`
+across server restarts.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `TINYINT UNSIGNED` | Always `1` |
+| `last_drop_time` | `BIGINT UNSIGNED` | UTC unix timestamp of the last successful boss drop |
+
+Primary key: `id`
+
 ---
 
 ## Technical Notes
@@ -610,6 +637,7 @@ for either target.
 | `conf/mod-tcg-vendors.conf.dist` | Configuration template — copy and remove `.dist` to activate |
 | `sql/characters/base/create_tcg_redeemed_table.sql` | Creates `character_tcg_redeemed` table |
 | `sql/characters/base/create_tcg_codes_table.sql` | Creates `account_tcg_codes` table |
+| `sql/characters/base/create_tcg_boss_drop_state_table.sql` | Creates `mod_tcg_vendors_state` table |
 | `sql/world/base/zzz_tcg_vendors_setup.sql` | NPC script names, gossip flags, creature spawns |
 | `tools/generate_codes.py` | Interactive and CLI code generation tool |
 
@@ -680,6 +708,19 @@ for either target.
 - `zzz_tcg_vendors_setup.sql` updated: `npc_text` 90004, `ScriptName` and
   `npcflag` updates for entries 29095 and 29093.
   
+---
+
+### v1.4 — Boss drop rarity and cooldown
+
+- `TCGVendors.BossDrop.Chance` — new config option (default `5`) controlling the percent
+  chance that an eligible boss kill actually produces a stationery code.
+- `TCGVendors.BossDrop.CooldownHours` — new config option (default `48`) enforcing a
+  minimum time between successful boss drops, server-wide, so the drop is limited to at
+  most once every other day.
+- `mod_tcg_vendors_state` — new characters-database table persisting the last successful
+  boss drop timestamp so the cooldown survives server restarts.
+- `create_tcg_boss_drop_state_table.sql` added to `sql/characters/base`.
+
 ---
 
 ## Credits
