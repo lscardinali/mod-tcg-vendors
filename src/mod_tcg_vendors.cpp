@@ -2407,9 +2407,9 @@ public:
         if (!GetBossDropEnabled() || !killer || !killed)
             return;
 
-        uint32 creatureEntry = killed->GetEntry();
-        auto bossIds = GetBossDropCreatureIds();
-        if (std::find(bossIds.begin(), bossIds.end(), creatureEntry) == bossIds.end())
+        // Check if this is a dungeon/raid boss or world boss
+        // This covers all instance bosses and world bosses automatically
+        if (!killed->IsDungeonBoss() && !killed->isWorldBoss())
             return;
 
         auto itemIds = GetBossDropItemIds();
@@ -2422,6 +2422,7 @@ public:
         if (roll > dropChance)
             return;  // Drop didn't proc this time
 
+        uint32 creatureEntry = killed->GetEntry();
         uint32 itemId = itemIds[urand(0, static_cast<uint32>(itemIds.size()) - 1)];
         std::string rewardGroup = GetRewardGroupForItem(itemId);
         if (rewardGroup.empty())
@@ -2511,9 +2512,20 @@ public:
             return;
  
         uint32 creatureEntry = source->GetEntry();
+        
+        // Check if this creature is in our boss list (if using manual list mode)
         auto bossIds = GetBossDropCreatureIds();
-        if (std::find(bossIds.begin(), bossIds.end(), creatureEntry) == bossIds.end())
-            return;
+        if (!bossIds.empty())
+        {
+            if (std::find(bossIds.begin(), bossIds.end(), creatureEntry) == bossIds.end())
+                return;
+        }
+        else
+        {
+            // Auto-detect mode: verify this is actually a boss
+            if (!source->IsDungeonBoss() && !source->isWorldBoss())
+                return;
+        }
 
         if (item->GetEntry() != 9311)
             return;
@@ -2585,21 +2597,38 @@ public:
         int mailMode = GetBossDropMailMode();
         auto bossIds = GetBossDropCreatureIds();
 
-        // MailParticipants = 1 (mail only): no loot rows needed — stationery
-        // is mailed directly to participants, never appears on the corpse.
-        // Also skip loot rows if CreatureIds is empty regardless of mail mode.
-        if (mailMode == 1 || bossIds.empty())
+        // Auto-detect mode (empty CreatureIds list)
+        if (bossIds.empty())
         {
             LoadLootTemplates_Creature();
             LootTemplates_Creature.CheckLootRefs();
-            if (mailMode == 1)
-                LOG_INFO("module",
-                    "mod-tcg-vendors: BossDrop MailParticipants=1 (mail only). "
-                    "No loot template rows inserted.");
+            
+            if (mailMode == 0 || mailMode == 2)
+            {
+                LOG_WARN("module",
+                    "mod-tcg-vendors: BossDrop enabled with auto-detect mode (empty CreatureIds). "
+                    "Loot window delivery (MailParticipants=0 or 2) requires a manual CreatureIds list. "
+                    "Only mail delivery (MailParticipants=1) is supported in auto-detect mode.");
+            }
             else
+            {
                 LOG_INFO("module",
-                    "mod-tcg-vendors: BossDrop enabled but CreatureIds is empty. "
-                    "All stationery loot rows purged.");
+                    "mod-tcg-vendors: BossDrop enabled in auto-detect mode. "
+                    "All dungeon and raid bosses will drop TCG codes via mail to party members.");
+            }
+            return;
+        }
+
+        // Manual list mode with CreatureIds specified
+        // MailParticipants = 1 (mail only): no loot rows needed — stationery
+        // is mailed directly to participants, never appears on the corpse.
+        if (mailMode == 1)
+        {
+            LoadLootTemplates_Creature();
+            LootTemplates_Creature.CheckLootRefs();
+            LOG_INFO("module",
+                "mod-tcg-vendors: BossDrop MailParticipants=1 (mail only). "
+                "No loot template rows inserted.");
             return;
         }
 
