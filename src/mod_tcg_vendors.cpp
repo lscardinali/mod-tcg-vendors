@@ -2352,6 +2352,21 @@ static int GetBossDropMailMode()
     return mode;
 }
 
+// TCGVendors.BossDrop.DropChance
+// Returns the drop chance percentage (0.01 to 100.0)
+static float GetBossDropChance()
+{
+    float chance = sConfigMgr->GetOption<float>("TCGVendors.BossDrop.DropChance", 100.0f);
+    if (chance < 0.01f || chance > 100.0f)
+    {
+        LOG_WARN("module",
+            "mod-tcg-vendors: TCGVendors.BossDrop.DropChance has invalid value {} "
+            "— falling back to 100.0 (guaranteed drop).", chance);
+        return 100.0f;
+    }
+    return chance;
+}
+
 // ============================================================
 //  Boss Drop State
 //
@@ -2400,6 +2415,12 @@ public:
         auto itemIds = GetBossDropItemIds();
         if (itemIds.empty())
             return;
+
+        // Roll for drop chance - applies to all delivery modes
+        float dropChance = GetBossDropChance();
+        float roll = frand(0.0f, 100.0f);
+        if (roll > dropChance)
+            return;  // Drop didn't proc this time
 
         uint32 itemId = itemIds[urand(0, static_cast<uint32>(itemIds.size()) - 1)];
         std::string rewardGroup = GetRewardGroupForItem(itemId);
@@ -2530,7 +2551,7 @@ public:
 //
 //  On server startup, ensures every boss entry configured in
 //  TCGVendors.BossDrop.CreatureIds has a creature_loot_template
-//  row guaranteeing a 100% drop of item 9311 (Simple Stationery).
+//  row for item 9311 (Simple Stationery) at the configured drop chance.
 //
 //  If any new rows are written, the creature loot tables are
 //  reloaded in-process — no manual .reload or restart required.
@@ -2583,16 +2604,18 @@ public:
         }
 
         // MailParticipants = 0 or 2: stationery appears on the corpse.
-        // Insert one row per configured boss at 100% drop chance.
+        // Insert one row per configured boss at the configured drop chance.
+        float dropChance = GetBossDropChance();
         for (uint32 bossEntry : bossIds)
         {
             WorldDatabase.Execute(
                 "INSERT INTO creature_loot_template "
                 "(Entry, Item, Reference, Chance, QuestRequired, LootMode, GroupId, MinCount, MaxCount, Comment) "
-                "VALUES ({}, 9311, 0, 100, 0, 1, 0, 1, 1, 'TCG code scroll — mod-tcg-vendors')",
-                bossEntry);
+                "VALUES ({}, 9311, 0, {}, 0, 1, 0, 1, 1, 'TCG code scroll — mod-tcg-vendors')",
+                bossEntry, dropChance);
             LOG_INFO("module",
-                "mod-tcg-vendors: Registered stationery drop for boss entry {}.", bossEntry);
+                "mod-tcg-vendors: Registered stationery drop for boss entry {} at {}% chance.",
+                bossEntry, dropChance);
         }
 
         LoadLootTemplates_Creature();

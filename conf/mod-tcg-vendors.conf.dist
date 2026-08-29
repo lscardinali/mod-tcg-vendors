@@ -108,10 +108,11 @@ TCGVendors.LandroBoxesMultiRedeem = 0
 #  two delivery methods described below.
 #
 #  On server startup, the module ensures each configured boss entry has a
-#  creature_loot_template row guaranteeing a 100% drop of Simple Stationery
-#  (item 9311).  If any rows are missing they are inserted automatically and
-#  the creature loot tables are reloaded in-process — no manual .reload or
-#  server restart is required after adding a new boss to CreatureIds.
+#  creature_loot_template row for Simple Stationery (item 9311) at the 
+#  configured drop chance percentage. If any rows are missing they are 
+#  inserted automatically and the creature loot tables are reloaded 
+#  in-process — no manual .reload or server restart is required after 
+#  adding a new boss to CreatureIds.
 #
 #  The stationery item contains the generated code along with flavor text
 #  identifying the boss defeated, the item that can be redeemed, and the
@@ -229,3 +230,26 @@ TCGVendors.BossDrop.ItemIds =
 #    Default: 0
 #
 TCGVendors.BossDrop.MailParticipants = 0
+
+###############################################################################
+#  TCGVendors.BossDrop.DropChance
+#
+#    Drop chance percentage for TCG code generation on boss kills.
+#    This affects ALL delivery modes (loot window, mail, or both).
+#
+#    When a configured boss is killed, the server rolls against this percentage
+#    to determine if a TCG code drop should occur. If the roll succeeds:
+#    - Mail mode: all party/raid members receive mailed stationery
+#    - Loot mode: stationery appears in the boss loot window
+#    - Both modes: both mail and loot delivery occur
+#
+#    Value range: 0.01 to 100.0
+#    - 100.0 = guaranteed drop (every kill)
+#    - 15.0 = 15% chance (somewhat low - recommended for party-wide drops)
+#    - 10.0 = 10% chance
+#    - 5.0 = 5% chance (rare)
+#    - 1.0 = 1% chance (very rare)
+#
+#    Default: 100.0
+#
+TCGVendors.BossDrop.DropChance = 100.0
