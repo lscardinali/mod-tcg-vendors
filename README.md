@@ -356,6 +356,13 @@ than once per character.
 | `0` *(default)* | One-time per character. Both boxes are recorded in `character_tcg_redeemed`. |
 | `1` | Unlimited. Both boxes are treated as consumables. In Mode 2/3 each code is still single-use; this only removes the per-character uniqueness gate. |
 
+### `TCGVendors.Debug`
+
+Verbose tracing for setup and boss-drop troubleshooting. Default: `0`.
+
+When `1`, every skipped or successful boss kill is written to `worldserver.log`. A diagnostic
+report is always printed at startup regardless of this flag. See [Debugging](#debugging).
+
 ### `TCGVendors.BossDrop.Enabled`
 
 Master switch for the boss drop system. Default: `0` (disabled).
@@ -376,6 +383,9 @@ Comma-separated list of item entry IDs from the TCG/promotional catalogs. Each b
 randomly selects one item from this pool; the generated stationery code will be redeemable
 for that item. All entries must exist in the module's reward catalog.
 Example: `TCGVendors.BossDrop.ItemIds = 23720,33224,38576`
+
+**This list is required.** If it is empty (the default), boss kills never generate mail
+or loot even when `DropChance` is `100`. The startup diagnostic report flags this.
 
 ### `TCGVendors.BossDrop.MailParticipants`
 
@@ -410,6 +420,63 @@ tables always mirror the config file.
 
 ---
 
+## Debugging
+
+If NPCs do nothing, or boss kills never produce mail, start here. The module now prints a
+**diagnostic report** to `worldserver.log` on every startup (search for `mod-tcg-vendors:`).
+
+### Quick in-game checks (GM)
+
+| Command | What it does |
+|---------|----------------|
+| `.tcg status` | Prints the same diagnostic report (loaded config, SQL tables, NPC ScriptNames, item 9311) |
+| `.tcg inspect` | Select a creature first. Reports whether that kill would currently generate a drop, including `IsDungeonBoss()` / `isWorldBoss()` and `instance_encounters` |
+| `.tcg testdrop` | Mails a stationery to **you** using the first configured `ItemIds` entry. Confirms mailbox delivery independently of boss detection |
+
+Turn on verbose kill tracing:
+
+```
+TCGVendors.Debug = 1
+```
+
+Then `.reload config` (or restart) and kill the boss again. Every skip reason is logged:
+disabled, not a detected boss, empty `ItemIds`, roll miss, stationery create failure, mail sent.
+
+### "I set DropChance = 100 and still got no mail"
+
+That is almost never RNG. Check these in order:
+
+1. **Confirm the live config file was edited.** AzerothCore loads
+   `configs/modules/mod-tcg-vendors.conf` (copied from the `.dist` at cmake/install time),
+   **not** the copy sitting in `modules/mod-tcg-vendors/conf/`. After a change, restart or
+   `.reload config`, then confirm the startup report shows the values you expect
+   (`BossDrop.Enabled = 1`, `DropChance = 100`, `ItemIds` not empty).
+2. **`TCGVendors.BossDrop.Enabled = 1`.** DropChance is ignored while this is `0`.
+3. **`TCGVendors.BossDrop.ItemIds` must not be empty.** An empty list is the default.
+   Eligible kills are detected and then silently dropped unless this is set, e.g.
+   `TCGVendors.BossDrop.ItemIds = 23720,33224,38576,46778,54069`.
+4. **`TCGVendors.BossDrop.MailParticipants = 1` (or `2`)** for mail. `0` is loot-window only.
+5. **The creature must actually be a detected boss.** Auto-detect uses AzerothCore's
+   `IsDungeonBoss()` (kill-credit rows in `instance_encounters`) and `isWorldBoss()`.
+   Optional bosses, event mobs, and some dungeon "final" NPCs are **not** flagged.
+   Use `.tcg inspect` on the corpse/target. If it says no, put that `creature_template`
+   entry in `TCGVendors.BossDrop.CreatureIds`.
+6. **Run `.tcg testdrop`.** If that mail arrives, delivery works and the problem is
+   detection or config. If it does not, item 9311 is missing or mail is broken.
+
+### Other common setup misses
+
+- Folder must be named exactly `mod-tcg-vendors` or the script loader will not register.
+- World SQL not applied: NPCs keep default gossip (`ScriptName` empty). The startup report
+  flags this.
+- Characters SQL not applied: `account_tcg_codes` / `character_tcg_redeemed` missing.
+- Mode `2` (default) requires generated codes; with zero unused codes the vendors look
+  "broken" because every entry is rejected. Use Mode `1` for testing, or generate codes.
+- Default boss drop chance is **5%**. Two kills at 5% often produce nothing even when
+  everything else is correct — use `100.0` while testing.
+
+---
+
 ## GM Tools
 
 Game Masters with GM mode active (`.gm on`) receive a special menu at all seven NPCs in every
@@ -434,6 +501,14 @@ re-delivery, bypassing the redemption flag check entirely.
 A dedicated menu option at each NPC prompts for a character name and deletes all rows in
 `character_tcg_redeemed` for that character, resetting their eligibility for all unique items.
 The count of cleared records is reported back as a whisper.
+
+### Diagnostic commands
+
+| Command | Description |
+|---------|-------------|
+| `.tcg status` | Dump loaded config, SQL table health, and NPC script assignment |
+| `.tcg inspect` | With a creature selected, report whether that kill would generate a drop |
+| `.tcg testdrop` | Mail a test stationery to yourself (requires `BossDrop.ItemIds`) |
 
 ### Mail an Item Code
 
@@ -606,12 +681,30 @@ for either target.
 
 | File | Description |
 |------|-------------|
-| `src/mod_tcg_vendors.cpp` | All C++ logic — NPC scripts, delivery, code redemption, boss drop |
+| `src/mod_tcg_vendors.cpp` | All C++ logic — NPC scripts, delivery, code redemption, boss drop, diagnostics |
 | `conf/mod-tcg-vendors.conf.dist` | Configuration template — copy and remove `.dist` to activate |
-| `sql/characters/base/create_tcg_redeemed_table.sql` | Creates `character_tcg_redeemed` table |
-| `sql/characters/base/create_tcg_codes_table.sql` | Creates `account_tcg_codes` table |
-| `sql/world/base/zzz_tcg_vendors_setup.sql` | NPC script names, gossip flags, creature spawns |
+| `data/sql/characters/base/create_tcg_redeemed_table.sql` | Creates `character_tcg_redeemed` table |
+| `data/sql/characters/base/create_tcg_codes_table.sql` | Creates `account_tcg_codes` table |
+| `data/sql/world/base/zzz_tcg_vendors_setup.sql` | NPC script names, gossip flags, creature spawns |
 | `tools/generate_codes.py` | Interactive and CLI code generation tool |
+
+### v1.4 — Boss drop diagnostics and silent-fail fixes
+
+- Startup diagnostic report logs the **loaded** config values, SQL table health, NPC
+  `ScriptName`s, and whether stationery item 9311 exists — so a mismatch between the
+  file you edited and the file the server loaded is visible immediately.
+- `TCGVendors.Debug` logs why each kill was skipped (disabled, not a detected boss,
+  empty `ItemIds`, roll result, mail success/failure).
+- GM commands `.tcg status`, `.tcg inspect`, and `.tcg testdrop`.
+- Eligible boss kills with an empty `ItemIds` list now log an error instead of failing
+  silently (the usual cause of "DropChance = 100 and I got no mail").
+- Manual `CreatureIds` lists are honoured on kill. Previously auto-detect's
+  `IsDungeonBoss()` / `isWorldBoss()` check ran even when a list was configured, so
+  listed non-flagged creatures never dropped.
+- Pet killing blows now trigger the same drop path (`OnPlayerCreatureKilledByPet`).
+- Mail delivery no longer double-rolls against `DropChance` on top of the loot-table
+  chance (loot-window stationery is parked whenever loot mode is active).
+- `conf/conf.sh.dist` SQL paths corrected to `data/sql/...` so db_assembler finds the files.
 
 ### v1.0 — Initial implementation
 
