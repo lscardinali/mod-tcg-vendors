@@ -6,9 +6,9 @@
 ## BASE SQL
 
 DB_CHARACTERS_CUSTOM_PATHS+=(
-	$MOD_TCG_VENDORS_ROOT"/sql/characters/base/"
+	$MOD_TCG_VENDORS_ROOT"/data/sql/characters/base/"
 )
 
 DB_WORLD_CUSTOM_PATHS+=(
-	$MOD_TCG_VENDORS_ROOT"/sql/world/base/"
+	$MOD_TCG_VENDORS_ROOT"/data/sql/world/base/"
 )

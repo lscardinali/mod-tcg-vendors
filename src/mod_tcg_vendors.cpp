@@ -1,3 +1,4 @@
+#include "Chat.h"
 #include "Config.h"
 #include "Creature.h"
 #include "DatabaseEnv.h"
@@ -8,6 +9,7 @@
 #include "LootMgr.h"
 #include "Mail.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "ScriptedGossip.h"
 #include "ScriptMgr.h"
@@ -16,6 +18,7 @@
 #include <algorithm>
 #include <cctype>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -2307,32 +2310,57 @@ static bool GetBossDropEnabled()
     return sConfigMgr->GetOption<bool>("TCGVendors.BossDrop.Enabled", false);
 }
 
-static std::vector<uint32> GetBossDropCreatureIds()
+static bool IsDebugEnabled()
+{
+    return sConfigMgr->GetOption<bool>("TCGVendors.Debug", false);
+}
+
+#define TCG_DEBUG(...) \
+    do { if (IsDebugEnabled()) { LOG_INFO("module", __VA_ARGS__); } } while (0)
+
+static std::string TrimToken(std::string token)
+{
+    auto start = token.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos)
+        return {};
+    auto end = token.find_last_not_of(" \t\r\n");
+    return token.substr(start, end - start + 1);
+}
+
+static std::vector<uint32> ParseIdList(std::string const& str)
 {
     std::vector<uint32> ids;
-    std::string str = sConfigMgr->GetOption<std::string>("TCGVendors.BossDrop.CreatureIds", "");
-    size_t start = 0, end;
-    while ((end = str.find(',', start)) != std::string::npos) {
-        std::string token = str.substr(start, end - start);
-        if (!token.empty()) ids.push_back(std::stoul(token));
-        start = end + 1;
+    std::string token;
+    std::istringstream ss(str);
+    while (std::getline(ss, token, ','))
+    {
+        token = TrimToken(token);
+        if (token.empty())
+            continue;
+        try
+        {
+            unsigned long const value = std::stoul(token);
+            if (value > 0 && value <= 0xFFFFFFFFul)
+                ids.push_back(static_cast<uint32>(value));
+            else
+                LOG_WARN("module", "mod-tcg-vendors: ignoring out-of-range id '{}'", token);
+        }
+        catch (...)
+        {
+            LOG_WARN("module", "mod-tcg-vendors: ignoring invalid id '{}'", token);
+        }
     }
-    if (start < str.size()) ids.push_back(std::stoul(str.substr(start)));
     return ids;
+}
+
+static std::vector<uint32> GetBossDropCreatureIds()
+{
+    return ParseIdList(sConfigMgr->GetOption<std::string>("TCGVendors.BossDrop.CreatureIds", ""));
 }
 
 static std::vector<uint32> GetBossDropItemIds()
 {
-    std::vector<uint32> ids;
-    std::string str = sConfigMgr->GetOption<std::string>("TCGVendors.BossDrop.ItemIds", "");
-    size_t start = 0, end;
-    while ((end = str.find(',', start)) != std::string::npos) {
-        std::string token = str.substr(start, end - start);
-        if (!token.empty()) ids.push_back(std::stoul(token));
-        start = end + 1;
-    }
-    if (start < str.size()) ids.push_back(std::stoul(str.substr(start)));
-    return ids;
+    return ParseIdList(sConfigMgr->GetOption<std::string>("TCGVendors.BossDrop.ItemIds", ""));
 }
 
 // TCGVendors.BossDrop.MailParticipants
@@ -2367,10 +2395,258 @@ static float GetBossDropChance()
     return chance;
 }
 
+static char const* VendorModeName(int mode)
+{
+    switch (mode)
+    {
+        case MODE_DISABLED:  return "Disabled";
+        case MODE_FREE:      return "Free";
+        case MODE_BLIZZLIKE: return "Blizz-like";
+        case MODE_ITEM_CODE: return "Item-Specific Code";
+        default:             return "Unknown";
+    }
+}
+
+static char const* MailModeName(int mode)
+{
+    switch (mode)
+    {
+        case 0:  return "loot window only";
+        case 1:  return "mail only";
+        case 2:  return "mail and loot";
+        default: return "unknown";
+    }
+}
+
+static bool IsCreatureEligibleForBossDrop(Creature* killed, std::string* reason = nullptr)
+{
+    auto setReason = [&](std::string const& text)
+    {
+        if (reason)
+            *reason = text;
+    };
+
+    if (!killed)
+    {
+        setReason("killed creature is null");
+        return false;
+    }
+
+    auto bossIds = GetBossDropCreatureIds();
+    if (!bossIds.empty())
+    {
+        bool const listed = std::find(bossIds.begin(), bossIds.end(), killed->GetEntry()) != bossIds.end();
+        setReason(listed
+            ? "entry is in TCGVendors.BossDrop.CreatureIds"
+            : "entry is not in TCGVendors.BossDrop.CreatureIds");
+        return listed;
+    }
+
+    // Auto-detect: AzerothCore stamps CREATURE_FLAG_EXTRA_DUNGEON_BOSS onto
+    // creature templates listed as kill-credit in instance_encounters.
+    // isWorldBoss() is true when type_flags includes CREATURE_TYPE_FLAG_BOSS_MOB.
+    if (killed->IsDungeonBoss())
+    {
+        setReason("auto-detect: IsDungeonBoss() is true");
+        return true;
+    }
+    if (killed->isWorldBoss())
+    {
+        setReason("auto-detect: isWorldBoss() is true");
+        return true;
+    }
+
+    setReason("auto-detect: not a dungeon/world boss (IsDungeonBoss=false, isWorldBoss=false). "
+              "This creature is not a kill-credit entry in instance_encounters. "
+              "Add its creature_template ID to TCGVendors.BossDrop.CreatureIds, or target a true encounter boss.");
+    return false;
+}
+
+static Item* MailStationeryToPlayer(Player* player, std::string const& subject,
+                                    std::string const& text, MailSender sender)
+{
+    Item* scroll = CreateStationeryWithText(player, text);
+    if (!scroll)
+    {
+        LOG_ERROR("module",
+            "mod-tcg-vendors: failed to create stationery item 9311 for {} (guid {}). "
+            "Confirm item_template contains entry 9311 (Default Stationery).",
+            player->GetName(), player->GetGUID().GetCounter());
+        return nullptr;
+    }
+
+    uint32 scrollGuid = scroll->GetGUID().GetCounter();
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+    scroll->SaveToDB(trans);
+    MailDraft(subject, "")
+        .AddItem(scroll)
+        .SendMailTo(trans, MailReceiver(player, player->GetGUID().GetCounter()), sender);
+    CharacterDatabase.CommitTransaction(trans);
+    DirectWriteItemText(scrollGuid, text);
+    return scroll;
+}
+
+static std::vector<std::string> BuildDiagnosticReport()
+{
+    std::vector<std::string> lines;
+    auto add = [&](std::string const& line) { lines.push_back(line); };
+
+    int const mode = GetVendorMode();
+    int const mailMode = GetBossDropMailMode();
+    bool const enabled = GetBossDropEnabled();
+    bool const debug = IsDebugEnabled();
+    float const chance = GetBossDropChance();
+    auto bossIds = GetBossDropCreatureIds();
+    auto itemIds = GetBossDropItemIds();
+
+    add(std::string("Debug = ") + (debug ? "1" : "0"));
+    {
+        std::ostringstream ss;
+        ss << "Mode = " << mode << " (" << VendorModeName(mode) << ")";
+        add(ss.str());
+    }
+    add(std::string("LandroBoxesMultiRedeem = ") +
+        (GetLandroBoxIsConsumable() ? "1" : "0"));
+    add(std::string("BossDrop.Enabled = ") + (enabled ? "1" : "0"));
+    {
+        std::ostringstream ss;
+        ss << "BossDrop.DropChance = " << chance;
+        add(ss.str());
+    }
+    {
+        std::ostringstream ss;
+        ss << "BossDrop.MailParticipants = " << mailMode << " (" << MailModeName(mailMode) << ")";
+        add(ss.str());
+    }
+    {
+        std::ostringstream ss;
+        ss << "BossDrop.CreatureIds = ";
+        if (bossIds.empty())
+            ss << "(empty — auto-detect dungeon/raid bosses)";
+        else
+        {
+            ss << bossIds.size() << " id(s): ";
+            for (size_t i = 0; i < bossIds.size(); ++i)
+            {
+                if (i)
+                    ss << ",";
+                ss << bossIds[i];
+            }
+        }
+        add(ss.str());
+    }
+    {
+        std::ostringstream ss;
+        ss << "BossDrop.ItemIds = ";
+        if (itemIds.empty())
+            ss << "(EMPTY — no codes can be generated)";
+        else
+        {
+            ss << itemIds.size() << " item(s): ";
+            for (size_t i = 0; i < itemIds.size(); ++i)
+            {
+                if (i)
+                    ss << ",";
+                ss << itemIds[i];
+            }
+        }
+        add(ss.str());
+    }
+
+    if (!enabled)
+        add("WARNING: BossDrop is disabled. Set TCGVendors.BossDrop.Enabled = 1 and restart (or .reload config).");
+    if (enabled && itemIds.empty())
+        add("ERROR: BossDrop is enabled but ItemIds is empty. Kills will never mail or drop codes.");
+    if (enabled && bossIds.empty() && (mailMode == 0 || mailMode == 2))
+        add("WARNING: Auto-detect mode cannot populate loot tables. Use MailParticipants = 1, or set CreatureIds.");
+
+    if (QueryResult tables = CharacterDatabase.Query("SHOW TABLES LIKE 'account_tcg_codes'"))
+    {
+        uint32 total = 0, unused = 0, used = 0;
+        if (QueryResult c1 = CharacterDatabase.Query("SELECT COUNT(*) FROM account_tcg_codes"))
+            total = static_cast<uint32>(c1->Fetch()[0].Get<uint64>());
+        if (QueryResult c2 = CharacterDatabase.Query("SELECT COUNT(*) FROM account_tcg_codes WHERE redeemed = 0"))
+            unused = static_cast<uint32>(c2->Fetch()[0].Get<uint64>());
+        if (QueryResult c3 = CharacterDatabase.Query("SELECT COUNT(*) FROM account_tcg_codes WHERE redeemed = 1"))
+            used = static_cast<uint32>(c3->Fetch()[0].Get<uint64>());
+        std::ostringstream ss;
+        ss << "account_tcg_codes: " << total << " row(s) (" << unused << " unused, " << used << " redeemed)";
+        add(ss.str());
+        if ((mode == MODE_BLIZZLIKE || mode == MODE_ITEM_CODE) && unused == 0)
+            add("WARNING: Mode requires codes but none are unused. Generate some with tools/generate_codes.py, or switch to Mode 1.");
+    }
+    else
+        add("ERROR: characters table account_tcg_codes is missing. Apply data/sql/characters/base/create_tcg_codes_table.sql");
+
+    if (!CharacterDatabase.Query("SHOW TABLES LIKE 'character_tcg_redeemed'"))
+        add("ERROR: characters table character_tcg_redeemed is missing. Apply data/sql/characters/base/create_tcg_redeemed_table.sql");
+    else
+        add("character_tcg_redeemed: present");
+
+    struct NpcExpect { uint32 entry; char const* script; };
+    static NpcExpect const npcs[] = {
+        { 17249, "npc_landro_longshot" },
+        { 2943,  "npc_blizzcon_vendor" },
+        { 7951,  "npc_blizzcon_vendor" },
+        { 16070, "npc_promo_vendor" },
+        { 16076, "npc_promo_vendor" },
+        { 29095, "npc_tyraels_vendor" },
+        { 29093, "npc_tyraels_vendor" },
+    };
+    if (QueryResult npcRows = WorldDatabase.Query(
+            "SELECT entry, name, ScriptName, npcflag FROM creature_template "
+            "WHERE entry IN (17249,2943,7951,16070,16076,29095,29093) ORDER BY entry"))
+    {
+        do
+        {
+            Field* f = npcRows->Fetch();
+            uint32 entry = f[0].Get<uint32>();
+            std::string name = f[1].Get<std::string>();
+            std::string script = f[2].Get<std::string>();
+            uint32 npcflag = f[3].Get<uint32>();
+            char const* expected = "";
+            for (auto const& n : npcs)
+                if (n.entry == entry)
+                    expected = n.script;
+            std::ostringstream ss;
+            ss << "NPC " << entry << " " << name << ": ScriptName='" << script << "' npcflag=" << npcflag;
+            if (expected[0] && script != expected)
+                ss << "  ERROR expected ScriptName '" << expected << "' (world SQL not applied?)";
+            else if (!(npcflag & 1))
+                ss << "  ERROR gossip flag (0x1) is not set";
+            add(ss.str());
+        } while (npcRows->NextRow());
+    }
+    else
+        add("ERROR: could not read creature_template for TCG vendor NPCs.");
+
+    if (QueryResult item9311 = WorldDatabase.Query("SELECT name FROM item_template WHERE entry = 9311"))
+    {
+        std::ostringstream ss;
+        ss << "item 9311 (stationery): '" << item9311->Fetch()[0].Get<std::string>() << "'";
+        add(ss.str());
+    }
+    else
+        add("ERROR: item_template is missing entry 9311. Boss-drop mail cannot create stationery.");
+
+    return lines;
+}
+
+static void LogDiagnosticReport()
+{
+    LOG_INFO("module", "mod-tcg-vendors: ===== diagnostic report =====");
+    for (std::string const& line : BuildDiagnosticReport())
+        LOG_INFO("module", "mod-tcg-vendors: {}", line);
+    LOG_INFO("module", "mod-tcg-vendors: ===== end diagnostic report =====");
+    LOG_INFO("module",
+        "mod-tcg-vendors: Enable TCGVendors.Debug = 1 for per-kill skip reasons. "
+        "In-game: .tcg status  |  .tcg inspect (select a creature)  |  .tcg testdrop");
+}
+
 // ============================================================
 //  Boss Drop State
 //
-//  Keyed by creature entry ID.  Written in OnPlayerCreatureKill,
+//  Keyed by creature entry ID.  Written on eligible boss kills,
 //  read in OnPlayerLootItem when each player picks up the stationery.
 //
 //  WHY THIS IS NECESSARY:
@@ -2392,10 +2668,154 @@ struct PendingBossDrop
 
 // Safe: AzerothCore map update loop is single-threaded per map.
 static std::map<uint32, PendingBossDrop> s_pendingBossDrops;
+static ObjectGuid s_lastBossDropKillGuid;
+
+static void ProcessBossDropKill(Player* killer, Creature* killed, char const* sourceHook)
+{
+    if (!killer || !killed)
+        return;
+
+    if (killed->GetGUID() == s_lastBossDropKillGuid)
+    {
+        TCG_DEBUG("mod-tcg-vendors: BossDrop ignoring duplicate {} hook for '{}' ({})",
+            sourceHook, killed->GetName(), killed->GetEntry());
+        return;
+    }
+
+    if (!GetBossDropEnabled())
+    {
+        TCG_DEBUG("mod-tcg-vendors: BossDrop skipped '{}' ({}) via {}: TCGVendors.BossDrop.Enabled = 0",
+            killed->GetName(), killed->GetEntry(), sourceHook);
+        return;
+    }
+
+    std::string reason;
+    if (!IsCreatureEligibleForBossDrop(killed, &reason))
+    {
+        if (IsDebugEnabled())
+        {
+            Map const* map = killed->GetMap();
+            LOG_INFO("module",
+                "mod-tcg-vendors: BossDrop skipped '{}' ({}) via {}: {} "
+                "[map={}, isDungeon={}, IsDungeonBoss={}, isWorldBoss={}]",
+                killed->GetName(), killed->GetEntry(), sourceHook, reason,
+                map ? map->GetId() : 0,
+                map && map->IsDungeon(),
+                killed->IsDungeonBoss(),
+                killed->isWorldBoss());
+        }
+        return;
+    }
+
+    s_lastBossDropKillGuid = killed->GetGUID();
+
+    LOG_INFO("module",
+        "mod-tcg-vendors: BossDrop evaluating '{}' ({}) killed by {} [{}] — {}",
+        killed->GetName(), killed->GetEntry(), killer->GetName(), sourceHook, reason);
+
+    auto itemIds = GetBossDropItemIds();
+    if (itemIds.empty())
+    {
+        LOG_ERROR("module",
+            "mod-tcg-vendors: BossDrop skipped '{}' ({}) because TCGVendors.BossDrop.ItemIds is empty. "
+            "Set it to a comma-separated list of catalog item entries, e.g. "
+            "TCGVendors.BossDrop.ItemIds = 23720,33224,38576",
+            killed->GetName(), killed->GetEntry());
+        return;
+    }
+
+    int const mailMode = GetBossDropMailMode();
+    float const dropChance = GetBossDropChance();
+    bool sendMail = mailMode >= 1;
+    bool const parkLoot = (mailMode == 0 || mailMode == 2);
+
+    // Loot-window chance is already applied by creature_loot_template.
+    // Rolling again here made loot+text a chance^2 event. Only roll for mail.
+    if (sendMail)
+    {
+        float const roll = frand(0.0f, 100.0f);
+        bool const hit = roll <= dropChance;
+        LOG_INFO("module",
+            "mod-tcg-vendors: BossDrop mail roll for '{}' ({}) = {:.2f} vs {:.2f}% — {}",
+            killed->GetName(), killed->GetEntry(), roll, dropChance,
+            hit ? "HIT" : "MISS");
+        if (!hit)
+            sendMail = false;
+    }
+
+    uint32 const itemId = itemIds[urand(0, static_cast<uint32>(itemIds.size()) - 1)];
+    std::string rewardGroup = GetRewardGroupForItem(itemId);
+    if (rewardGroup.empty())
+    {
+        LOG_ERROR("module",
+            "mod-tcg-vendors: BossDrop item {} has no matching reward_group. "
+            "Check TCGVendors.BossDrop.ItemIds and REWARD_GROUPS.", itemId);
+        return;
+    }
+
+    std::string bossName = killed->GetName();
+    std::string itemName = GetItemName(itemId);
+
+    if (parkLoot)
+    {
+        s_pendingBossDrops[killed->GetEntry()] = { rewardGroup, bossName, itemName, itemId };
+        TCG_DEBUG("mod-tcg-vendors: parked loot-window stationery metadata for entry {} ({})",
+            killed->GetEntry(), itemName);
+    }
+
+    if (!sendMail)
+        return;
+
+    std::vector<Player*> participants;
+    if (Group* group = killer->GetGroup())
+    {
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+        {
+            Player* member = ref->GetSource();
+            if (member && member->GetMap() == killed->GetMap())
+                participants.push_back(member);
+        }
+    }
+    else
+    {
+        participants.push_back(killer);
+    }
+
+    if (participants.empty())
+    {
+        LOG_WARN("module",
+            "mod-tcg-vendors: BossDrop mail HIT for '{}' ({}) but no online participants were found on the same map.",
+            bossName, killed->GetEntry());
+        return;
+    }
+
+    uint32 mailed = 0;
+    for (Player* p : participants)
+    {
+        std::string pCode = GenerateRandomCode();
+        InsertCodeToDatabase(pCode, rewardGroup);
+        std::string pText = BuildStationeryText(bossName, itemName, pCode, itemId);
+        if (!MailStationeryToPlayer(p, "A reward for your valor!", pText, MailSender(killed)))
+            continue;
+
+        ++mailed;
+        LOG_INFO("module",
+            "mod-tcg-vendors: BossDrop mailed code {} ({}) to {} for killing '{}'",
+            pCode, itemName, p->GetName(), bossName);
+    }
+
+    if (mailed == 0)
+    {
+        LOG_ERROR("module",
+            "mod-tcg-vendors: BossDrop mail HIT for '{}' ({}) but every stationery create/send failed. "
+            "Check that item 9311 exists in item_template.",
+            bossName, killed->GetEntry());
+    }
+}
 
 // ============================================================
 //  tcg_boss_drop_script  (PlayerScript)
-//  Uses OnPlayerCreatureKill to detect configured boss kills.
+//  Detects configured boss kills from the player and from player pets.
 // ============================================================
 class tcg_boss_drop_script : public PlayerScript
 {
@@ -2404,88 +2824,12 @@ public:
 
     void OnPlayerCreatureKill(Player* killer, Creature* killed) override
     {
-        if (!GetBossDropEnabled() || !killer || !killed)
-            return;
+        ProcessBossDropKill(killer, killed, "OnPlayerCreatureKill");
+    }
 
-        // Check if this is a dungeon/raid boss or world boss
-        // This covers all instance bosses and world bosses automatically
-        if (!killed->IsDungeonBoss() && !killed->isWorldBoss())
-            return;
-
-        auto itemIds = GetBossDropItemIds();
-        if (itemIds.empty())
-            return;
-
-        // Roll for drop chance - applies to all delivery modes
-        float dropChance = GetBossDropChance();
-        float roll = frand(0.0f, 100.0f);
-        if (roll > dropChance)
-            return;  // Drop didn't proc this time
-
-        uint32 creatureEntry = killed->GetEntry();
-        uint32 itemId = itemIds[urand(0, static_cast<uint32>(itemIds.size()) - 1)];
-        std::string rewardGroup = GetRewardGroupForItem(itemId);
-        if (rewardGroup.empty())
-        {
-            LOG_ERROR("module",
-                "mod-tcg-vendors: BossDrop item {} has no matching reward_group. "
-                "Check TCGVendors.BossDrop.ItemIds and REWARD_GROUPS.", itemId);
-            return;
-        }
-
-        std::string bossName = killed->GetName();
-        std::string itemName = GetItemName(itemId);
-
-        // Park metadata only — code generation happens in OnPlayerLootItem
-        // so each looting player gets their own unique code from the corpse.
-        // The mail-participants path generates its own codes independently.
-        s_pendingBossDrops[creatureEntry] = { rewardGroup, bossName, itemName, itemId };
-
-        // ---- Optional: mail a unique code to every group/raid member ----
-        // Fires for MailParticipants = 1 (mail only) or 2 (mail + loot).
-        if (GetBossDropMailMode() >= 1)
-        {
-            std::vector<Player*> participants;
-            if (Group* group = killer->GetGroup())
-            {
-                for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
-                {
-                    Player* member = ref->GetSource();
-                    if (member && member->GetMap() == killed->GetMap())
-                        participants.push_back(member);
-                }
-            }
-            else
-            {
-                participants.push_back(killer);
-            }
-
-            for (Player* p : participants)
-            {
-                std::string pCode = GenerateRandomCode();
-                InsertCodeToDatabase(pCode, rewardGroup);
-
-                std::string pText = BuildStationeryText(bossName, itemName, pCode, itemId);
-                Item* scroll = CreateStationeryWithText(p, pText);
-                if (!scroll)
-                    continue;
-
-                uint32 scrollGuid = scroll->GetGUID().GetCounter();
-
-                CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-                scroll->SaveToDB(trans);
-                MailDraft("A reward for your valor!", "")
-                    .AddItem(scroll)
-                    .SendMailTo(trans,
-                        MailReceiver(p, p->GetGUID().GetCounter()),
-                        MailSender(killed));
-                CharacterDatabase.CommitTransaction(trans);
-
-                // Safety net: write text directly to item_instance in case
-                // SaveToDB does not include m_text in this fork.
-                DirectWriteItemText(scrollGuid, pText);
-            }
-        }
+    void OnPlayerCreatureKilledByPet(Player* petOwner, Creature* killed) override
+    {
+        ProcessBossDropKill(petOwner, killed, "OnPlayerCreatureKilledByPet");
     }
 };
 
@@ -2532,7 +2876,11 @@ public:
  
         auto it = s_pendingBossDrops.find(creatureEntry);
         if (it == s_pendingBossDrops.end())
+        {
+            TCG_DEBUG("mod-tcg-vendors: looted stationery 9311 from '{}' ({}) but no pending boss-drop metadata was parked for that entry",
+                source->GetName(), creatureEntry);
             return;
+        }
  
         const PendingBossDrop& drop = it->second;
  
@@ -2541,20 +2889,11 @@ public:
         InsertCodeToDatabase(code, drop.rewardGroup);
         std::string text = BuildStationeryText(drop.bossName, drop.itemName, code, drop.itemId);
 
-        // Stamp the looted item in-place.
-        //
-        // StampItemText does three things:
-        //   1. item->SetText(text)       — sets m_text for future SaveToDB calls
-        //   2. SetFlag(ITEM_FIELD_FLAGS, ITEM_FIELD_FLAG_READABLE) — tells the
-        //      client this item has readable text; client sends CMSG_ITEM_TEXT_QUERY
-        //   3. SetState(ITEM_CHANGED)    — queues the flag update to be sent to
-        //      the client on the next update cycle
-        //
-        // DirectWriteItemText immediately writes to item_instance.text so the
-        // text is available the moment the client queries (CMSG_ITEM_TEXT_QUERY),
-        // without waiting for the next autosave.
         StampItemText(item, player, text);
         DirectWriteItemText(item->GetGUID().GetCounter(), text);
+        LOG_INFO("module",
+            "mod-tcg-vendors: stamped loot-window stationery for {} with code {} ({}) from '{}'",
+            player->GetName(), code, drop.itemName, drop.bossName);
     }
 };
 
@@ -2591,11 +2930,20 @@ public:
             LOG_INFO("module",
                 "mod-tcg-vendors: BossDrop disabled. "
                 "All stationery loot rows purged.");
+            LogDiagnosticReport();
             return;
         }
 
         int mailMode = GetBossDropMailMode();
         auto bossIds = GetBossDropCreatureIds();
+        auto itemIds = GetBossDropItemIds();
+        if (itemIds.empty())
+        {
+            LOG_ERROR("module",
+                "mod-tcg-vendors: BossDrop is ENABLED but TCGVendors.BossDrop.ItemIds is empty. "
+                "No codes will be generated and no mail will be sent. "
+                "Example: TCGVendors.BossDrop.ItemIds = 23720,33224,38576,46778,54069");
+        }
 
         // Auto-detect mode (empty CreatureIds list)
         if (bossIds.empty())
@@ -2616,6 +2964,7 @@ public:
                     "mod-tcg-vendors: BossDrop enabled in auto-detect mode. "
                     "All dungeon and raid bosses will drop TCG codes via mail to party members.");
             }
+            LogDiagnosticReport();
             return;
         }
 
@@ -2629,6 +2978,7 @@ public:
             LOG_INFO("module",
                 "mod-tcg-vendors: BossDrop MailParticipants=1 (mail only). "
                 "No loot template rows inserted.");
+            LogDiagnosticReport();
             return;
         }
 
@@ -2652,6 +3002,13 @@ public:
         LOG_INFO("module",
             "mod-tcg-vendors: Creature loot templates synced — {} boss drop row(s) active.",
             static_cast<uint32>(bossIds.size()));
+        LogDiagnosticReport();
+    }
+
+    void OnAfterConfigLoad(bool reload) override
+    {
+        if (reload)
+            LogDiagnosticReport();
     }
 };
 
@@ -2846,6 +3203,118 @@ public:
 // ============================================================
 //  Script registration
 // ============================================================
+using namespace Acore::ChatCommands;
+
+class tcg_vendors_commandscript : public CommandScript
+{
+public:
+    tcg_vendors_commandscript() : CommandScript("tcg_vendors_commandscript") {}
+
+    ChatCommandTable GetCommands() const override
+    {
+        static ChatCommandTable tcgCommandTable =
+        {
+            { "status",   HandleStatusCommand,   SEC_GAMEMASTER, Console::Yes },
+            { "inspect",  HandleInspectCommand,  SEC_GAMEMASTER, Console::No  },
+            { "testdrop", HandleTestDropCommand, SEC_GAMEMASTER, Console::No  },
+        };
+        static ChatCommandTable commandTable =
+        {
+            { "tcg", tcgCommandTable },
+        };
+        return commandTable;
+    }
+
+    static bool HandleStatusCommand(ChatHandler* handler)
+    {
+        handler->SendSysMessage("mod-tcg-vendors diagnostic report:");
+        for (std::string const& line : BuildDiagnosticReport())
+            handler->PSendSysMessage("{}", line);
+        return true;
+    }
+
+    static bool HandleInspectCommand(ChatHandler* handler)
+    {
+        Creature* target = handler->getSelectedCreature();
+        if (!target)
+        {
+            handler->SendSysMessage("Select a creature first, then use .tcg inspect.");
+            return true;
+        }
+
+        std::string reason;
+        bool const eligible = IsCreatureEligibleForBossDrop(target, &reason);
+        Map const* map = target->GetMap();
+
+        handler->PSendSysMessage("Inspecting '{}' (entry {})", target->GetName(), target->GetEntry());
+        handler->PSendSysMessage("  map = {}  isDungeon = {}",
+            map ? map->GetId() : 0, map && map->IsDungeon());
+        handler->PSendSysMessage("  IsDungeonBoss() = {}  isWorldBoss() = {}",
+            target->IsDungeonBoss(), target->isWorldBoss());
+        handler->PSendSysMessage("  BossDrop.Enabled = {}", GetBossDropEnabled());
+        handler->PSendSysMessage("  would currently drop: {} — {}", eligible ? "YES" : "NO", reason);
+
+        if (QueryResult enc = WorldDatabase.Query(
+                "SELECT entry, creditType FROM instance_encounters WHERE creditEntry = {}",
+                target->GetEntry()))
+        {
+            do
+            {
+                Field* f = enc->Fetch();
+                handler->PSendSysMessage("  instance_encounters: encounter {} creditType {}",
+                    f[0].Get<uint32>(), f[1].Get<uint32>());
+            } while (enc->NextRow());
+        }
+        else
+            handler->SendSysMessage("  instance_encounters: no kill-credit row for this entry");
+
+        if (GetBossDropItemIds().empty())
+            handler->SendSysMessage("  ItemIds is EMPTY — even an eligible kill will not mail.");
+        return true;
+    }
+
+    static bool HandleTestDropCommand(ChatHandler* handler)
+    {
+        Player* player = handler->GetPlayer();
+        if (!player)
+        {
+            handler->SendSysMessage(".tcg testdrop must be used in-game.");
+            return true;
+        }
+
+        auto itemIds = GetBossDropItemIds();
+        if (itemIds.empty())
+        {
+            handler->SendSysMessage("TCGVendors.BossDrop.ItemIds is empty. Set it before using .tcg testdrop.");
+            return true;
+        }
+
+        uint32 const itemId = itemIds.front();
+        std::string rewardGroup = GetRewardGroupForItem(itemId);
+        if (rewardGroup.empty())
+        {
+            handler->PSendSysMessage("Item {} is not in the module reward catalog.", itemId);
+            return true;
+        }
+
+        std::string code = GenerateRandomCode();
+        InsertCodeToDatabase(code, rewardGroup);
+        std::string itemName = GetItemName(itemId);
+        std::string text = BuildStationeryText("a GM test", itemName, code, itemId);
+        if (!MailStationeryToPlayer(player, "TCG Vendors test drop", text, MailSender(MAIL_NORMAL, 0)))
+        {
+            handler->SendSysMessage("Failed to create/send stationery. Check that item 9311 exists in item_template.");
+            return true;
+        }
+
+        handler->PSendSysMessage("Mailed test stationery to {} with code {} for '{}'. Check your mailbox.",
+            player->GetName(), code, itemName);
+        LOG_INFO("module", "mod-tcg-vendors: .tcg testdrop mailed {} ({}) to {}",
+            code, itemName, player->GetName());
+        return true;
+    }
+};
+
 void Addmod_tcg_vendorsScripts()
 {
     new npc_landro_longshot();
@@ -2855,4 +3324,5 @@ void Addmod_tcg_vendorsScripts()
     new tcg_boss_drop_script();
     new tcg_boss_drop_player_script();
     new tcg_boss_drop_world_script();
+    new tcg_vendors_commandscript();
 }

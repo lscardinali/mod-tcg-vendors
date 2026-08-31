@@ -99,6 +99,27 @@ TCGVendors.Mode = 2
 TCGVendors.LandroBoxesMultiRedeem = 0
 
 ###############################################################################
+#  TCGVendors.Debug
+#
+#    Verbose diagnostics for setup and boss-drop troubleshooting.
+#
+#    When enabled, worldserver.log records why each kill was skipped
+#    (disabled, not a detected boss, empty ItemIds, roll miss, etc.).
+#    A full config/SQL health report is always printed at startup
+#    (even with Debug = 0). In-game GM commands:
+#
+#      .tcg status     Dump the same diagnostic report
+#      .tcg inspect    Check the targeted creature (would this kill mail?)
+#      .tcg testdrop   Mail a stationery to yourself to test delivery
+#
+#    0 - Off  (default)
+#    1 - On
+#
+#    Default: 0
+#
+TCGVendors.Debug = 0
+
+###############################################################################
 #
 #  B O S S   D R O P   S E T T I N G S
 #
@@ -135,6 +156,8 @@ TCGVendors.LandroBoxesMultiRedeem = 0
 #
 #    0 - Disabled  (default)
 #    1 - Enabled
+#
+#    *** If you set DropChance but forget this, you will never get mail. ***
 #
 #    Default: 0
 #
@@ -214,7 +237,8 @@ TCGVendors.BossDrop.CreatureIds =
 #    the drop will be skipped for that kill.
 #
 #    This setting is REQUIRED when BossDrop is enabled. If empty, boss kills
-#    will be detected but no codes will be generated.
+#    will be detected but no codes will be generated AND NO MAIL WILL BE SENT.
+#    An error is logged at startup and on each eligible kill until you set it.
 #
 #    Example (a few popular items):
 #    TCGVendors.BossDrop.ItemIds = 23720,33224,38576,46778,54069
